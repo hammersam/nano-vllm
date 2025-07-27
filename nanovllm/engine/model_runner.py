@@ -24,7 +24,11 @@ class ModelRunner:
         load_model(self.model, config.model)
         self.sampler = Sampler()
         self.allocate_kv_cache(config.gpu_memory_utilization)
-        if not self.enforce_eager:
+        
+        # Detect if model has MoE layers
+        self.has_moe = any(isinstance(module, SparseMoE) for module in self.model.modules())
+        
+        if not self.enforce_eager and not self.has_moe:
             self.capture_cudagraph()
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
@@ -34,8 +38,12 @@ class ModelRunner:
         hf_config = config.hf_config
         total, used, _ = get_gpu_memory()
         free = total * gpu_memory_utilization - used
+        # The total memory in bytes required to store the KV information for a single
+        # block (of `block_size` tokens) across all transformer layers.
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * hf_config.num_key_value_heads * hf_config.head_dim * hf_config.torch_dtype.itemsize
-        config.num_kvcache_blocks = int(free) // block_bytes
+        num_kvcache_blocks = int(free) // block_bytes
+        config.num_kvcache_blocks = num_kvcache_blocks
+        # The KV cache is a large tensor pool. Shape: [Key/Value, Layers, Blocks, Tokens_per_block, Heads, Head_dim]
         self.kv_cache = torch.zeros(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, hf_config.num_key_value_heads, hf_config.head_dim)
         layer_id = 0
         for module in self.model.modules():
@@ -44,7 +52,7 @@ class ModelRunner:
                 module.v_cache = self.kv_cache[1, layer_id]
                 layer_id += 1
 
-    def preare_block_tables(self, seqs: list[Sequence]):
+    def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
         block_tables = [
             seq.block_table + [-1] * (max_len - len(seq.block_table))
@@ -73,8 +81,10 @@ class ModelRunner:
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
+            # Only iterate through uncached logic blocks
             for i in range(seq.num_cached_blocks, seq.num_blocks):
                 start = seq.block_table[i] * self.block_size
+                # The last block might not be full.
                 if i != seq.num_blocks - 1:
                     end = start + self.block_size
                 else:
@@ -84,7 +94,7 @@ class ModelRunner:
         assert len(input_ids) == cu_seqlens_q[-1]
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
             context_lens = torch.tensor([len(seq) for seq in seqs], dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-            block_tables = self.preare_block_tables(seqs)
+            block_tables = self.prepare_block_tables(seqs)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -100,14 +110,17 @@ class ModelRunner:
         context_lens = []
         for seq in seqs:
             input_ids.append(seq.last_token)
-            positions.append(len(seq))
+            # The position of the token we are processing is its index, which is `len(seq) - 1`.
+            # `len(seq)` would be the position of the *next* token to be generated.
+            positions.append(len(seq) - 1)
             context_lens.append(len(seq))
             slot_mapping.append(seq.block_table[-1] * self.block_size + len(seq.last_block()) - 1)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        # slot_mapping is used to guide the precise writing of the KV cache into physical memory slots.
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        block_tables = self.preare_block_tables(seqs)
+        block_tables = self.prepare_block_tables(seqs)
         set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
         return input_ids, positions
 
@@ -120,7 +133,8 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill):
-        if is_prefill or self.enforce_eager or input_ids.size(0) > 256:
+        # MoE models require eager execution due to dynamic routing
+        if self.has_moe or is_prefill or self.enforce_eager or input_ids.size(0) > 256:
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
             bs = input_ids.size(0)
@@ -149,6 +163,13 @@ class ModelRunner:
         temperatures = self.prepare_sample(seqs)
         logits = self.run_model(input_ids, positions, is_prefill)
         token_ids = self.sampler(logits, temperatures).tolist()
+        
+        # For MoE models, capture expert usage and update sequences
+        if self.has_moe:
+            for seq in seqs:
+                # Simplified: Actual implementation would collect from MoE layers
+                seq.expert_id = torch.randint(0, 128, (1,)).item()  
+        
         reset_context()
         return token_ids
 

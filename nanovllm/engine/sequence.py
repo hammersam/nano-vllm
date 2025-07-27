@@ -25,6 +25,7 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        self.expert_id = -1  # Track associated expert for MoE optimization
 
     def __len__(self):
         return len(self.token_ids)
