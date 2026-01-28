@@ -22,6 +22,7 @@ class RMSNorm(nn.Module):
         x = x.float()
         var = x.pow(2).mean(dim=-1, keepdim=True)
         x.mul_(torch.rsqrt(var + self.eps))
+        # rmsnorm(x) = weight * (x * (1 / sqrt(var + eps)))
         x = x.to(orig_dtype).mul_(self.weight)
         return x
 

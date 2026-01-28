@@ -46,10 +46,27 @@ class LLMEngine:
         self.scheduler.add(seq)
 
     def step(self):
+        # 1. Scheduling phase
+        # Fetch a batch of sequences from the waiting or running queue, and determine
+        # whether to process new requests (is_prefill=True) or continue generation (is_prefill=False).
         seqs, is_prefill = self.scheduler.schedule()
+        # 2. Model execution phase
+        # If is_prefill is True, the input is (B, seq_len), computing kvcache for all tokens
+        # in parallel to predict the next token. If False, the input is the newly generated
+        # token for each sequence (i.e., (B, 1)).
         token_ids = self.model_runner.call("run", seqs, is_prefill)
+        # 3. Post-processing phase
+        # Append the generated token_ids to the sequences, check for EOS or max length.
+        # If a sequence is finished, release its memory.
         self.scheduler.postprocess(seqs, token_ids)
+        # 4. Collect outputs
+        # Filter and return the completion tokens of finished sequences.
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
+        # 5. Calculate throughput
+        # Calculate the number of tokens processed in this step for tokens/s calculation.
+        # For prefill, it's the total tokens of all seqs; for decode, it's the number of seqs
+        # (since each generates one token). Use negative numbers to help the generate function
+        # distinguish between prefill and decode.
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
         return outputs, num_tokens
 

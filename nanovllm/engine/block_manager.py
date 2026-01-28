@@ -48,7 +48,7 @@ class BlockManager:
         self.used_block_ids.add(block_id)
         return self.blocks[block_id]
 
-    def _deallocate_block(self, block_id: int) -> Block:
+    def _deallocate_block(self, block_id: int):
         assert self.blocks[block_id].ref_count == 0
         self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
@@ -62,8 +62,11 @@ class BlockManager:
         cache_miss = False
         for i in range(seq.num_blocks):
             token_ids = seq.block(i)
+            # 计算hash
             h = self.compute_hash(token_ids, h) if len(token_ids) == self.block_size else -1
+            # 查找是否存在相同的块
             block_id = self.hash_to_block_id.get(h, -1)
+            # 如果不存在相同的块或者发生哈希冲突
             if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
                 cache_miss = True
             if cache_miss:
@@ -73,6 +76,7 @@ class BlockManager:
                 seq.num_cached_tokens += self.block_size
                 if block_id in self.used_block_ids:
                     block = self.blocks[block_id]
+                    # 增加引用计数，实现共享
                     block.ref_count += 1
                 else:
                     block = self._allocate_block(block_id)
@@ -96,15 +100,22 @@ class BlockManager:
     def may_append(self, seq: Sequence):
         block_table = seq.block_table
         last_block = self.blocks[block_table[-1]]
+        # 刚进入新块的第一个token，需要重新分配一个块，但是
+        # 只有最后block存满了之后才会计算hash值并更新全局查找
+        # 表hash_to_block_id
         if len(seq) % self.block_size == 1:
             assert last_block.hash != -1
+            # 获取一个空闲块
             block_id = self.free_block_ids[0]
+            # 分配
             self._allocate_block(block_id)
+            # 添加到块表
             block_table.append(block_id)
         elif len(seq) % self.block_size == 0:
             assert last_block.hash == -1
             token_ids = seq.block(seq.num_blocks-1)
             prefix = self.blocks[block_table[-2]].hash if len(block_table) > 1 else -1
+            # prefix caching
             h = self.compute_hash(token_ids, prefix)
             last_block.update(h, token_ids)
             self.hash_to_block_id[h] = last_block.block_id

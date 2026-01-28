@@ -31,6 +31,7 @@ class Scheduler:
             if num_batched_tokens + len(seq) > self.max_num_batched_tokens or not self.block_manager.can_allocate(seq):
                 break
             num_seqs += 1
+            # 一次性分配prompt所需的所有kvcache显存块
             self.block_manager.allocate(seq)
             num_batched_tokens += len(seq) - seq.num_cached_tokens
             seq.status = SequenceStatus.RUNNING
@@ -43,13 +44,20 @@ class Scheduler:
         # decode
         while self.running and num_seqs < self.max_num_seqs:
             seq = self.running.popleft()
+            # Check if there is enough memory (blocks) to store the kv cache
+            # for the next token.
             while not self.block_manager.can_append(seq):
+                # Not enough memory. Try to free up blocks by preempting other
+                # running sequences.
                 if self.running:
+                    # Victim selection: preempt the sequence at the end of the queue.
                     self.preempt(self.running.pop())
                 else:
+                    # No other sequences to preempt. Preempt the current sequence itself.
                     self.preempt(seq)
                     break
             else:
+                # This block runs if the loop completed without 'break' (i.e., space is available).
                 num_seqs += 1
                 self.block_manager.may_append(seq)
                 scheduled_seqs.append(seq)

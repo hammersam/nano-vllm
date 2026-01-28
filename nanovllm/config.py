@@ -5,6 +5,16 @@ from transformers import AutoConfig
 
 @dataclass
 class Config:
+    """
+    Args:
+        model: Path to the model or HuggingFace model name.
+        max_num_batched_tokens: Maximum number of tokens in a batch.
+        max_num_seqs: Maximum number of sequences in a batch.
+        max_model_len: Maximum context length of the model.
+        gpu_memory_utilization: Fraction of GPU memory to use.
+        tensor_parallel_size: Number of GPUs for tensor parallelism.
+        enforce_eager: Whether to enforce eager execution (disable CUDA Graphs).
+    """
     model: str
     max_num_batched_tokens: int = 16384
     max_num_seqs: int = 512

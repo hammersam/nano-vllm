@@ -15,6 +15,8 @@ def main():
     llm = LLM(path, enforce_eager=False, max_model_len=4096)
 
     prompt_token_ids = [[randint(0, 10000) for _ in range(randint(100, max_input_len))] for _ in range(num_seqs)]
+    # 忽略EOS，让每个seq一直生成所有max_tokens个token为止
+    # temperature < 1，让模型输出更加确定
     sampling_params = [SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=randint(100, max_ouput_len)) for _ in range(num_seqs)]
     # uncomment the following line for vllm
     # prompt_token_ids = [dict(prompt_token_ids=p) for p in prompt_token_ids]
@@ -25,7 +27,7 @@ def main():
     t = (time.time() - t)
     total_tokens = sum(sp.max_tokens for sp in sampling_params)
     throughput = total_tokens / t
-    print(f"Total: {total_tokens}tok, Time: {t:.2f}s, Throughput: {throughput:.2f}tok/s")
+    print(f"Total generated: {total_tokens}tok, Time: {t:.2f}s, Throughput: {throughput:.2f}tok/s")
 
 
 if __name__ == "__main__":
